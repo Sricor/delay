@@ -1,9 +1,10 @@
-# delay
+# Delay
+Asynchronous delayed tasks using tokio runtime.
 
 ## Examples
 
 ```rust
-use delay::prelude::{time , TaskBuilder, TaskManager};
+use delay::prelude::{time, TaskBuilder, TaskManager};
 
 #[tokio::main]
 async fn main() {
