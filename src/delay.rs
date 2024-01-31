@@ -20,7 +20,6 @@ type TaskProcess = Box<dyn Fn() -> AsyncTask<()> + Send + Sync>;
 type TaskCallback = Box<dyn Fn(Result<(), TaskError>) -> AsyncTask<()> + Send + Sync>;
 
 // ===== Task =====
-
 pub struct Task {
     id: TaskId,
     valid: TaskValid,
@@ -55,17 +54,9 @@ impl TaskManager {
         let mut tasks = self.tasks.lock()?;
         tasks.insert(task.id, task.clone());
 
-        let sender = self.sender.clone();
-        tokio::spawn(async move {
-            loop {
-                tokio::time::sleep(task.interval).await;
-                if task.valid.load(Ordering::Relaxed) {
-                    sender.send(task.clone()).await.unwrap();
-                } else {
-                    break;
-                }
-            }
-        });
+        if task.valid.load(Ordering::Relaxed) {
+            self.run_task(task);
+        }
 
         Ok(())
     }
@@ -80,6 +71,7 @@ impl TaskManager {
         }
     }
 
+    /// Forcibly call a task process, regardless of task validity
     pub async fn trigger_task(&self, id: TaskId) -> Result<(), TaskManagerError> {
         let task = self.get_task_by_id(id)?;
         self.sender.send(task).await?;
@@ -102,6 +94,7 @@ impl TaskManager {
         let task = self.get_task_by_id(id)?;
         if !task.valid.load(Ordering::Relaxed) {
             task.valid.store(true, Ordering::Relaxed);
+            self.run_task(task);
         } else {
             return Err(TaskManagerError::TaskAlreadyRunning(id));
         }
@@ -132,6 +125,20 @@ impl TaskManager {
         let count = self.tasks.lock()?.len();
 
         Ok(count)
+    }
+
+    fn run_task(&self, task: Arc<Task>) {
+        let sender = self.sender.clone();
+        tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(task.interval).await;
+                if task.valid.load(Ordering::Relaxed) {
+                    sender.send(task.clone()).await.unwrap();
+                } else {
+                    break;
+                }
+            }
+        });
     }
 
     fn executor(mut receiver: mpsc::Receiver<Arc<Task>>) {
@@ -182,11 +189,13 @@ impl Default for TaskBuilder {
 }
 
 impl TaskBuilder {
+    /// The unique identifier of the task, through which the deletion task can be started or stopped.
     pub fn set_id(mut self, id: TaskId) -> Self {
         self.id = id;
         self
     }
 
+    /// Task execution code block
     pub fn set_process<F, Fut>(mut self, process: F) -> Self
     where
         F: Fn() -> Fut + Send + Sync + 'static,
@@ -196,6 +205,7 @@ impl TaskBuilder {
         self
     }
 
+    /// Callback process after task execution is completed
     pub fn set_callback<F, Fut>(mut self, callback: F) -> Self
     where
         F: Fn(Result<(), TaskError>) -> Fut + Send + Sync + 'static,
@@ -205,11 +215,13 @@ impl TaskBuilder {
         self
     }
 
+    /// The validity of the task. When it is false, the task created will not be automatically executed.
     pub fn set_valid(mut self, valid: bool) -> Self {
         self.valid = AtomicBool::new(valid);
         self
     }
 
+    /// The timeout period of the task. When the task execution times out, the timeout error will be passed to the callback.
     pub fn set_timeout(mut self, timeout: TaskTimeout) -> Self {
         self.timeout = Some(timeout);
         self
@@ -220,6 +232,7 @@ impl TaskBuilder {
         self
     }
 
+    /// Task execution cycle interval
     pub fn set_interval(mut self, interval: TaskInterval) -> Self {
         self.interval = interval;
         self
@@ -252,6 +265,54 @@ mod tests {
 
     fn new_manager() -> TaskManager {
         TaskManager::new()
+    }
+
+    #[tokio::test]
+    async fn test_insert_invalid_interval_task() {
+        let manager = new_manager();
+
+        let run_times = Arc::new(AtomicIsize::new(0));
+        let run_times_clone = Arc::clone(&run_times);
+
+        let task = TaskBuilder::default()
+            .set_id(1)
+            .set_valid(false)
+            .set_interval(Duration::from_secs(1))
+            .set_process(move || {
+                let times = Arc::clone(&run_times_clone);
+                async move {
+                    times.fetch_add(1, Ordering::Relaxed);
+                }
+            })
+            .build();
+        manager.insert_task(task).unwrap();
+
+        tokio::time::sleep(Duration::from_secs(2)).await;
+        assert_eq!(run_times.load(Ordering::Relaxed), 0);
+    }
+
+    #[tokio::test]
+    async fn test_insert_valid_interval_task() {
+        let manager = new_manager();
+
+        let run_times = Arc::new(AtomicIsize::new(0));
+        let run_times_clone = Arc::clone(&run_times);
+
+        let task = TaskBuilder::default()
+            .set_id(1)
+            .set_valid(true)
+            .set_interval(Duration::from_secs(2))
+            .set_process(move || {
+                let times = Arc::clone(&run_times_clone);
+                async move {
+                    times.fetch_add(1, Ordering::Relaxed);
+                }
+            })
+            .build();
+        manager.insert_task(task).unwrap();
+
+        tokio::time::sleep(Duration::from_secs(3)).await;
+        assert_eq!(run_times.load(Ordering::Relaxed), 1);
     }
 
     #[tokio::test]
