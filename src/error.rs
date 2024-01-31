@@ -5,11 +5,13 @@ use std::sync::PoisonError;
 use tokio::sync::mpsc::error::SendError;
 
 // ===== TaskManager Error =====
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, PartialEq, Clone, Copy)]
 pub enum TaskManagerError {
-    TaskNotExists,
-    TaskAlreadyExists,
-    TaskAlreadyRemove,
+    TaskNotExists(u64),
+    TaskAlreadyExists(u64),
+    TaskAlreadyRemove(u64),
+    TaskAlreadyRunning(u64),
+    TaskAlreadyStop(u64),
     TaskChannelSendError,
     TasksLockingError,
 }
@@ -18,19 +20,16 @@ impl Error for TaskManagerError {}
 
 impl fmt::Display for TaskManagerError {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f, "{}", Into::<&str>::into(*self))
-    }
-}
-
-impl Into<&str> for TaskManagerError {
-    fn into(self) -> &'static str {
-        match self {
-            Self::TaskNotExists => "task does not exist",
-            Self::TaskAlreadyExists => "task already exists",
-            Self::TaskAlreadyRemove => "task has been removed",
-            Self::TaskChannelSendError => "task channel send error",
-            Self::TasksLockingError => "locking tasks error",
-        }
+        let message = match self {
+            Self::TaskNotExists(id) => format!("task {id} does not exist"),
+            Self::TaskAlreadyExists(id) => format!("task {id} already exists"),
+            Self::TaskAlreadyRemove(id) => format!("task {id} has been removed"),
+            Self::TaskAlreadyRunning(id) => format!("task {id} is already running"),
+            Self::TaskAlreadyStop(id) => format!("task {id} has been stopped"),
+            Self::TaskChannelSendError => format!("task send to channel error"),
+            Self::TasksLockingError => format!("locking tasks error"),
+        };
+        write!(f, "{}", message)
     }
 }
 

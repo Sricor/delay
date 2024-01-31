@@ -13,17 +13,15 @@ use crate::error::{TaskError, TaskManagerError};
 type AsyncTask<T> = Pin<Box<dyn Future<Output = T> + Send + Sync>>;
 
 type TaskId = u64;
-type TaskName = String;
 type TaskTimeout = Duration;
 type TaskInterval = Duration;
-type TaskValid = Arc<AtomicBool>;
+type TaskValid = AtomicBool;
 type TaskProcess = Box<dyn Fn() -> AsyncTask<()> + Send + Sync>;
 type TaskCallback = Box<dyn Fn(Result<(), TaskError>) -> AsyncTask<()> + Send + Sync>;
 
 // ===== Task =====
 
 pub struct Task {
-    pub name: TaskName,
     id: TaskId,
     valid: TaskValid,
     process: TaskProcess,
@@ -34,7 +32,7 @@ pub struct Task {
 
 // ===== Task Manager =====
 pub struct TaskManager {
-    tasks: Arc<Mutex<HashMap<TaskId, Arc<Task>>>>,
+    tasks: Mutex<HashMap<TaskId, Arc<Task>>>,
     sender: mpsc::Sender<Arc<Task>>,
 }
 
@@ -42,7 +40,7 @@ impl TaskManager {
     // Create a new TaskManager
     pub fn new() -> Self {
         let (sender, receiver) = mpsc::channel::<Arc<Task>>(32);
-        let tasks = Arc::new(Mutex::new(HashMap::new()));
+        let tasks = Mutex::new(HashMap::new());
 
         TaskManager::executor(receiver);
         TaskManager { tasks, sender }
@@ -51,7 +49,7 @@ impl TaskManager {
     // Add a new task to the TaskManager
     pub fn insert_task(&self, task: Arc<Task>) -> Result<(), TaskManagerError> {
         if let Ok(_) = self.get_task_by_id(task.id) {
-            return Err(TaskManagerError::TaskAlreadyExists);
+            return Err(TaskManagerError::TaskAlreadyExists(task.id));
         }
 
         let mut tasks = self.tasks.lock()?;
@@ -78,7 +76,7 @@ impl TaskManager {
         let mut tasks = self.tasks.lock()?;
         match tasks.remove(&id) {
             Some(_) => Ok(()),
-            None => Err(TaskManagerError::TaskAlreadyRemove),
+            None => Err(TaskManagerError::TaskNotExists(id)),
         }
     }
 
@@ -91,14 +89,22 @@ impl TaskManager {
 
     pub fn stop_task(&self, id: TaskId) -> Result<(), TaskManagerError> {
         let task = self.get_task_by_id(id)?;
-        task.valid.store(false, Ordering::Relaxed);
+        if task.valid.load(Ordering::Relaxed) {
+            task.valid.store(false, Ordering::Relaxed);
+        } else {
+            return Err(TaskManagerError::TaskAlreadyStop(id));
+        }
 
         Ok(())
     }
 
     pub fn start_task(&self, id: TaskId) -> Result<(), TaskManagerError> {
         let task = self.get_task_by_id(id)?;
-        task.valid.store(true, Ordering::Relaxed);
+        if !task.valid.load(Ordering::Relaxed) {
+            task.valid.store(true, Ordering::Relaxed);
+        } else {
+            return Err(TaskManagerError::TaskAlreadyRunning(id));
+        }
 
         Ok(())
     }
@@ -118,7 +124,7 @@ impl TaskManager {
         let task = tasks.get(&id);
         match task {
             Some(t) => Ok(t.clone()),
-            None => Err(TaskManagerError::TaskNotExists),
+            None => Err(TaskManagerError::TaskNotExists(id)),
         }
     }
 
@@ -155,7 +161,6 @@ impl TaskManager {
 // ===== Task Builder =====
 pub struct TaskBuilder {
     id: TaskId,
-    name: TaskName,
     valid: TaskValid,
     process: TaskProcess,
     interval: TaskInterval,
@@ -167,8 +172,7 @@ impl Default for TaskBuilder {
     fn default() -> Self {
         Self {
             id: 0,
-            name: "".into(),
-            valid: Arc::new(AtomicBool::new(true)),
+            valid: AtomicBool::new(true),
             process: Box::new(move || Box::pin(async {})),
             interval: Duration::from_secs(1),
             callback: None,
@@ -180,11 +184,6 @@ impl Default for TaskBuilder {
 impl TaskBuilder {
     pub fn set_id(mut self, id: TaskId) -> Self {
         self.id = id;
-        self
-    }
-
-    pub fn set_name(mut self, name: TaskName) -> Self {
-        self.name = name;
         self
     }
 
@@ -207,7 +206,7 @@ impl TaskBuilder {
     }
 
     pub fn set_valid(mut self, valid: bool) -> Self {
-        self.valid = Arc::new(AtomicBool::new(valid));
+        self.valid = AtomicBool::new(valid);
         self
     }
 
@@ -234,7 +233,6 @@ impl TaskBuilder {
     pub fn build(self) -> Arc<Task> {
         let task = Task {
             id: self.id,
-            name: self.name,
             valid: self.valid,
             interval: self.interval,
             process: self.process,
@@ -312,6 +310,55 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_repeat_stop_interval_task() {
+        let manager = new_manager();
+
+        let run_times = Arc::new(AtomicIsize::new(0));
+        let run_times_clone = Arc::clone(&run_times);
+
+        let task = TaskBuilder::default()
+            .set_id(1)
+            .set_interval(Duration::from_secs(2))
+            .set_process(move || {
+                let times = Arc::clone(&run_times_clone);
+                async move {
+                    times.fetch_add(1, Ordering::Relaxed);
+                }
+            })
+            .build();
+        manager.insert_task(task).unwrap();
+        assert_eq!(manager.stop_task(1), Ok(()));
+        assert_eq!(
+            manager.stop_task(1),
+            Err(TaskManagerError::TaskAlreadyStop(1))
+        );
+    }
+
+    #[tokio::test]
+    async fn test_repeat_start_interval_task() {
+        let manager = new_manager();
+
+        let run_times = Arc::new(AtomicIsize::new(0));
+        let run_times_clone = Arc::clone(&run_times);
+
+        let task = TaskBuilder::default()
+            .set_id(1)
+            .set_interval(Duration::from_secs(2))
+            .set_process(move || {
+                let times = Arc::clone(&run_times_clone);
+                async move {
+                    times.fetch_add(1, Ordering::Relaxed);
+                }
+            })
+            .build();
+        manager.insert_task(task).unwrap();
+        assert_eq!(
+            manager.start_task(1),
+            Err(TaskManagerError::TaskAlreadyRunning(1))
+        );
+    }
+
+    #[tokio::test]
     async fn test_remove_task() {
         let manager = new_manager();
         let task = TaskBuilder::default().set_id(1).build();
@@ -321,6 +368,12 @@ mod tests {
 
         manager.remove_task(1).unwrap();
         assert_eq!(manager.task_count().unwrap(), 0);
+
+        // repeat remove
+        assert_eq!(
+            manager.remove_task(1),
+            Err(TaskManagerError::TaskNotExists(1))
+        );
     }
 
     #[tokio::test]
