@@ -16,6 +16,7 @@ type TaskId = u64;
 type TaskTimeout = Duration;
 type TaskInterval = Duration;
 type TaskValid = AtomicBool;
+type TaskRunnig = AtomicBool;
 type TaskProcess = Box<dyn Fn() -> AsyncTask<()> + Send + Sync>;
 type TaskCallback = Box<dyn Fn(Result<(), TaskError>) -> AsyncTask<()> + Send + Sync>;
 
@@ -23,6 +24,7 @@ type TaskCallback = Box<dyn Fn(Result<(), TaskError>) -> AsyncTask<()> + Send + 
 pub struct Task {
     id: TaskId,
     valid: TaskValid,
+    running: TaskRunnig,
     process: TaskProcess,
     interval: TaskInterval,
     callback: Option<TaskCallback>,
@@ -47,12 +49,14 @@ impl TaskManager {
 
     // Add a new task to the TaskManager
     pub fn insert_task(&self, task: Arc<Task>) -> Result<(), TaskManagerError> {
-        if let Ok(_) = self.get_task_by_id(task.id) {
+        if self.is_exists_task(task.id) {
             return Err(TaskManagerError::TaskAlreadyExists(task.id));
         }
 
-        let mut tasks = self.tasks.lock()?;
-        tasks.insert(task.id, task.clone());
+        {
+            let mut tasks = self.tasks.lock()?;
+            tasks.insert(task.id, task.clone());
+        };
 
         if task.valid.load(Ordering::Relaxed) {
             self.run_task(task);
@@ -130,7 +134,12 @@ impl TaskManager {
     fn run_task(&self, task: Arc<Task>) {
         let sender = self.sender.clone();
         tokio::spawn(async move {
+            if task.running.load(Ordering::Relaxed) {
+                return;
+            }
+
             loop {
+                task.running.store(true, Ordering::Relaxed);
                 tokio::time::sleep(task.interval).await;
                 if task.valid.load(Ordering::Relaxed) {
                     sender.send(task.clone()).await.unwrap();
@@ -138,6 +147,8 @@ impl TaskManager {
                     break;
                 }
             }
+
+            task.running.store(false, Ordering::Relaxed);
         });
     }
 
@@ -247,6 +258,7 @@ impl TaskBuilder {
         let task = Task {
             id: self.id,
             valid: self.valid,
+            running: AtomicBool::new(false),
             interval: self.interval,
             process: self.process,
             callback: self.callback,
@@ -450,5 +462,31 @@ mod tests {
 
         manager.insert_task(task).unwrap();
         time::sleep(Duration::from_secs(3)).await;
+    }
+
+    #[tokio::test]
+    async fn test_task_repeated_startup() {
+        let manager = new_manager();
+
+        let run_times = Arc::new(AtomicIsize::new(0));
+        let run_times_clone = Arc::clone(&run_times);
+
+        let task = TaskBuilder::default()
+            .set_id(1)
+            .set_interval(Duration::from_secs(3))
+            .set_process(move || {
+                let times = Arc::clone(&run_times_clone);
+                async move {
+                    times.fetch_add(1, Ordering::Relaxed);
+                }
+            })
+            .build();
+        manager.insert_task(task).unwrap();
+        manager.stop_task(1).unwrap();
+        manager.start_task(1).unwrap();
+        manager.stop_task(1).unwrap();
+        manager.start_task(1).unwrap();
+        time::sleep(Duration::from_secs(5)).await;
+        assert_eq!(run_times.load(Ordering::Relaxed), 1);
     }
 }
