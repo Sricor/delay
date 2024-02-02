@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -16,6 +16,7 @@ type TaskId = u64;
 type TaskTimeout = Duration;
 type TaskInterval = Duration;
 type TaskValid = AtomicBool;
+type TaskRunCount = AtomicU32;
 type TaskRunnig = AtomicBool;
 type TaskProcess = Box<dyn Fn() -> AsyncTask<()> + Send + Sync>;
 type TaskCallback = Box<dyn Fn(Result<(), TaskError>) -> AsyncTask<()> + Send + Sync>;
@@ -29,6 +30,8 @@ pub struct Task {
     interval: TaskInterval,
     callback: Option<TaskCallback>,
     timeout: Option<Duration>,
+    run_count: TaskRunCount,
+    max_run_count: Option<TaskRunCount>,
 }
 
 // ===== Task Manager =====
@@ -138,14 +141,18 @@ impl TaskManager {
                 return;
             }
 
-            loop {
-                task.running.store(true, Ordering::Relaxed);
+            task.running.store(true, Ordering::Relaxed);
+            'runner: loop {
                 tokio::time::sleep(task.interval).await;
+
+                // TODO: Max running
+
                 if task.valid.load(Ordering::Relaxed) {
                     sender.send(task.clone()).await.unwrap();
                 } else {
-                    break;
+                    break 'runner;
                 }
+
             }
 
             task.running.store(false, Ordering::Relaxed);
@@ -156,6 +163,15 @@ impl TaskManager {
         tokio::spawn(async move {
             while let Some(task) = receiver.recv().await {
                 tokio::spawn(async move {
+                    // Determine whether the maximum number of runs has been reached
+                    if let Some(limit) = &task.max_run_count {
+                        let max_run_count = limit.load(Ordering::Relaxed);
+                        if task.run_count.load(Ordering::Relaxed) >= max_run_count {
+                            task.valid.store(false, Ordering::Relaxed);
+                            return;
+                        }
+                    }
+
                     let task_result = if let Some(time) = task.timeout.as_ref() {
                         let result = time::timeout(*time, (task.process)()).await;
                         match result {
@@ -170,6 +186,9 @@ impl TaskManager {
                     if let Some(callback) = task.callback.as_ref() {
                         callback(task_result).await;
                     }
+                    
+                    // add one to the number of run count
+                    task.run_count.fetch_add(1, Ordering::Relaxed);
                 });
             }
         });
@@ -183,6 +202,7 @@ pub struct TaskBuilder {
     process: TaskProcess,
     interval: TaskInterval,
     callback: Option<TaskCallback>,
+    max_run_count: Option<TaskRunCount>,
     timeout: Option<Duration>,
 }
 
@@ -192,7 +212,8 @@ impl Default for TaskBuilder {
             id: 0,
             valid: AtomicBool::new(true),
             process: Box::new(move || Box::pin(async {})),
-            interval: Duration::from_secs(1),
+            interval: Duration::from_secs(5),
+            max_run_count: None,
             callback: None,
             timeout: None,
         }
@@ -254,11 +275,18 @@ impl TaskBuilder {
         self
     }
 
+    pub fn set_max_run_count(mut self, count: u32) -> Self {
+        self.max_run_count = Some(AtomicU32::new(count));
+        self
+    }
+
     pub fn build(self) -> Arc<Task> {
         let task = Task {
             id: self.id,
             valid: self.valid,
             running: AtomicBool::new(false),
+            run_count: AtomicU32::new(0),
+            max_run_count: self.max_run_count,
             interval: self.interval,
             process: self.process,
             callback: self.callback,
@@ -487,6 +515,57 @@ mod tests {
         manager.stop_task(1).unwrap();
         manager.start_task(1).unwrap();
         time::sleep(Duration::from_secs(5)).await;
+        assert_eq!(run_times.load(Ordering::Relaxed), 1);
+    }
+
+    #[tokio::test]
+    async fn test_task_max_run_count() {
+        let manager = new_manager();
+
+        let run_times = Arc::new(AtomicIsize::new(0));
+        let run_times_clone = Arc::clone(&run_times);
+
+        let task = TaskBuilder::default()
+            .set_id(1)
+            .set_interval(Duration::from_secs(1))
+            .set_process(move || {
+                let times = Arc::clone(&run_times_clone);
+                async move {
+                    times.fetch_add(1, Ordering::Relaxed);
+                }
+            })
+            .set_max_run_count(1)
+            .build();
+        manager.insert_task(task.clone()).unwrap();
+        time::sleep(Duration::from_secs(3)).await;
+
+        assert_eq!(task.run_count.load(Ordering::Relaxed), 1);
+        assert_eq!(run_times.load(Ordering::Relaxed), 1);
+    }
+
+    #[tokio::test]
+    async fn test_task_max_run_count_sleep() {
+        let manager = new_manager();
+
+        let run_times = Arc::new(AtomicIsize::new(0));
+        let run_times_clone = Arc::clone(&run_times);
+
+        let task = TaskBuilder::default()
+            .set_id(1)
+            .set_interval(Duration::from_secs(1))
+            .set_process(move || {
+                let times = Arc::clone(&run_times_clone);
+                async move {
+                    times.fetch_add(1, Ordering::Relaxed);
+                    time::sleep(Duration::from_secs(1)).await;
+                }
+            })
+            .set_max_run_count(1)
+            .build();
+        manager.insert_task(task.clone()).unwrap();
+        time::sleep(Duration::from_secs(3)).await;
+
+        assert_eq!(task.run_count.load(Ordering::Relaxed), 1);
         assert_eq!(run_times.load(Ordering::Relaxed), 1);
     }
 }
