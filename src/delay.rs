@@ -544,6 +544,38 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_task_max_run_zero_count() {
+        let manager = new_manager();
+
+        let run_times = Arc::new(AtomicIsize::new(0));
+        let run_times_clone = Arc::clone(&run_times);
+
+        let task = TaskBuilder::default()
+            .set_id(1)
+            .set_interval(Duration::from_secs(1))
+            .set_process(move || {
+                let times = Arc::clone(&run_times_clone);
+                async move {
+                    times.fetch_add(1, Ordering::Relaxed);
+                }
+            })
+            .set_max_run_count(0)
+            .build();
+
+        manager.insert_task(task.clone()).unwrap();
+        time::sleep(Duration::from_secs(3)).await;
+        assert_eq!(task.run_count.load(Ordering::Relaxed), 0);
+        assert_eq!(task.valid.load(Ordering::Relaxed), false);
+        assert_eq!(run_times.load(Ordering::Relaxed), 0);
+
+        manager.start_task(1).unwrap();
+        time::sleep(Duration::from_secs(3)).await;
+        assert_eq!(task.run_count.load(Ordering::Relaxed), 0);
+        assert_eq!(task.valid.load(Ordering::Relaxed), false);
+        assert_eq!(run_times.load(Ordering::Relaxed), 0);
+    }
+
+    #[tokio::test]
     async fn test_task_max_run_count_sleep() {
         let manager = new_manager();
 
