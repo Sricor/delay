@@ -9,7 +9,6 @@ fn async_task_benchmark(c: &mut Criterion) {
             let manager = TaskManager::new();
 
             let task = TaskBuilder::default()
-                .set_id(1)
                 .set_interval(time::Duration::from_secs(3))
                 .set_process(|| async {
                     println!("Run an asynchronous task");
@@ -29,7 +28,6 @@ fn async_task_timeout_benchmark(c: &mut Criterion) {
             let manager = TaskManager::new();
 
             let task = TaskBuilder::default()
-                .set_id(1)
                 .set_timeout_from_secs(1)
                 .set_process(|| async {
                     time::sleep(time::Duration::from_secs(2)).await;
@@ -54,11 +52,10 @@ fn concurrent_async_task_benchmark(c: &mut Criterion) {
             let manager = Arc::new(Mutex::new(TaskManager::new()));
 
             // Spawn multiple async tasks concurrently
-            for i in 0..50 {
+            for _ in 0..50 {
                 let manager = Arc::clone(&manager);
                 tokio::spawn(async move {
                     let task = TaskBuilder::default()
-                        .set_id(i)
                         .set_interval(time::Duration::from_secs(3))
                         .set_process(|| async {
                             println!("Run an asynchronous task");
