@@ -4,14 +4,16 @@ use std::sync::PoisonError;
 
 use tokio::sync::mpsc::error::SendError;
 
+use crate::delay::TaskIdentifier;
+
 // ===== TaskManager Error =====
-#[derive(Debug, PartialEq, Clone, Copy)]
+#[derive(Debug, PartialEq, Clone)]
 pub enum TaskManagerError {
-    TaskNotExists(u64),
-    TaskAlreadyExists(u64),
-    TaskAlreadyRemove(u64),
-    TaskAlreadyRunning(u64),
-    TaskAlreadyStop(u64),
+    TaskNotExists(TaskIdentifier),
+    TaskAlreadyExists(TaskIdentifier),
+    TaskAlreadyRemove(TaskIdentifier),
+    TaskAlreadyRunning(TaskIdentifier),
+    TaskAlreadyStop(TaskIdentifier),
     TaskChannelSendError,
     TasksLockingError,
 }

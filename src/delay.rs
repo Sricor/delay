@@ -7,12 +7,13 @@ use std::time::Duration;
 
 use tokio::sync::mpsc;
 use tokio::time;
+use uuid::Uuid;
 
 use crate::error::{TaskError, TaskManagerError};
 
 type AsyncTask<T> = Pin<Box<dyn Future<Output = T> + Send + Sync>>;
 
-type TaskId = u64;
+pub type TaskIdentifier = String;
 type TaskTimeout = Duration;
 type TaskInterval = Duration;
 type TaskValid = AtomicBool;
@@ -23,7 +24,7 @@ type TaskCallback = Box<dyn Fn(Result<(), TaskError>) -> AsyncTask<()> + Send + 
 
 // ===== Task =====
 pub struct Task {
-    id: TaskId,
+    id: TaskIdentifier,
     valid: TaskValid,
     running: TaskRunnig,
     process: TaskProcess,
@@ -36,7 +37,7 @@ pub struct Task {
 
 // ===== Task Manager =====
 pub struct TaskManager {
-    tasks: Mutex<HashMap<TaskId, Arc<Task>>>,
+    tasks: Mutex<HashMap<TaskIdentifier, Arc<Task>>>,
     sender: mpsc::Sender<Arc<Task>>,
 }
 
@@ -51,80 +52,81 @@ impl TaskManager {
     }
 
     // Add a new task to the TaskManager
-    pub fn insert_task(&self, task: Arc<Task>) -> Result<(), TaskManagerError> {
-        if self.is_exists_task(task.id) {
-            return Err(TaskManagerError::TaskAlreadyExists(task.id));
+    pub fn insert_task(&self, task: Arc<Task>) -> Result<TaskIdentifier, TaskManagerError> {
+        let id = task.id.clone();
+        if self.is_exists_task(&task.id) {
+            return Err(TaskManagerError::TaskAlreadyExists(task.id.clone()));
         }
 
         {
             let mut tasks = self.tasks.lock()?;
-            tasks.insert(task.id, task.clone());
+            tasks.insert(task.id.clone(), task.clone());
         };
 
         if task.valid.load(Ordering::Relaxed) {
             self.run_task(task);
         }
 
-        Ok(())
+        Ok(id)
     }
 
-    pub fn remove_task(&self, id: TaskId) -> Result<(), TaskManagerError> {
+    pub fn remove_task(&self, id: &TaskIdentifier) -> Result<(), TaskManagerError> {
         let _ = self.stop_task(id)?;
 
         let mut tasks = self.tasks.lock()?;
-        match tasks.remove(&id) {
+        match tasks.remove(id) {
             Some(_) => Ok(()),
-            None => Err(TaskManagerError::TaskNotExists(id)),
+            None => Err(TaskManagerError::TaskNotExists(id.clone())),
         }
     }
 
     /// Forcibly call a task process, regardless of task validity
-    pub async fn trigger_task(&self, id: TaskId) -> Result<(), TaskManagerError> {
+    pub async fn trigger_task(&self, id: &TaskIdentifier) -> Result<(), TaskManagerError> {
         let task = self.get_task_by_id(id)?;
         self.sender.send(task).await?;
 
         Ok(())
     }
 
-    pub fn stop_task(&self, id: TaskId) -> Result<(), TaskManagerError> {
+    pub fn stop_task(&self, id: &TaskIdentifier) -> Result<(), TaskManagerError> {
         let task = self.get_task_by_id(id)?;
         if task.valid.load(Ordering::Relaxed) {
             task.valid.store(false, Ordering::Relaxed);
         } else {
-            return Err(TaskManagerError::TaskAlreadyStop(id));
+            return Err(TaskManagerError::TaskAlreadyStop(id.clone()));
         }
 
         Ok(())
     }
 
-    pub fn start_task(&self, id: TaskId) -> Result<(), TaskManagerError> {
+    pub fn start_task(&self, id: &TaskIdentifier) -> Result<(), TaskManagerError> {
         let task = self.get_task_by_id(id)?;
         if !task.valid.load(Ordering::Relaxed) {
             task.valid.store(true, Ordering::Relaxed);
             self.run_task(task);
         } else {
-            return Err(TaskManagerError::TaskAlreadyRunning(id));
+            return Err(TaskManagerError::TaskAlreadyRunning(id.clone()));
         }
 
         Ok(())
     }
 
-    pub fn is_valid_task(&self, id: TaskId) -> Result<bool, TaskManagerError> {
+    pub fn is_valid_task(&self, id: &TaskIdentifier) -> Result<bool, TaskManagerError> {
         let task = self.get_task_by_id(id)?;
 
         Ok(task.valid.load(Ordering::Relaxed))
     }
 
-    pub fn is_exists_task(&self, id: TaskId) -> bool {
+    pub fn is_exists_task(&self, id: &TaskIdentifier) -> bool {
         self.get_task_by_id(id).is_ok()
     }
 
-    pub fn get_task_by_id(&self, id: TaskId) -> Result<Arc<Task>, TaskManagerError> {
+    pub fn get_task_by_id(&self, id: &TaskIdentifier) -> Result<Arc<Task>, TaskManagerError> {
         let tasks = self.tasks.lock()?;
-        let task = tasks.get(&id);
+        let task = tasks.get(id);
         match task {
             Some(t) => Ok(t.clone()),
-            None => Err(TaskManagerError::TaskNotExists(id)),
+            None => Err(TaskManagerError::TaskNotExists(id.clone())),
         }
     }
 
@@ -152,7 +154,6 @@ impl TaskManager {
                 } else {
                     break 'runner;
                 }
-
             }
 
             task.running.store(false, Ordering::Relaxed);
@@ -186,7 +187,7 @@ impl TaskManager {
                     if let Some(callback) = task.callback.as_ref() {
                         callback(task_result).await;
                     }
-                    
+
                     // add one to the number of run count
                     task.run_count.fetch_add(1, Ordering::Relaxed);
                 });
@@ -197,7 +198,7 @@ impl TaskManager {
 
 // ===== Task Builder =====
 pub struct TaskBuilder {
-    id: TaskId,
+    id: TaskIdentifier,
     valid: TaskValid,
     process: TaskProcess,
     interval: TaskInterval,
@@ -209,7 +210,7 @@ pub struct TaskBuilder {
 impl Default for TaskBuilder {
     fn default() -> Self {
         Self {
-            id: 0,
+            id: Uuid::new_v4().to_string(),
             valid: AtomicBool::new(true),
             process: Box::new(move || Box::pin(async {})),
             interval: Duration::from_secs(5),
@@ -222,7 +223,7 @@ impl Default for TaskBuilder {
 
 impl TaskBuilder {
     /// The unique identifier of the task, through which the deletion task can be started or stopped.
-    pub fn set_id(mut self, id: TaskId) -> Self {
+    pub fn set_id(mut self, id: TaskIdentifier) -> Self {
         self.id = id;
         self
     }
@@ -315,7 +316,6 @@ mod tests {
         let run_times_clone = Arc::clone(&run_times);
 
         let task = TaskBuilder::default()
-            .set_id(1)
             .set_valid(false)
             .set_interval(Duration::from_secs(1))
             .set_process(move || {
@@ -339,7 +339,6 @@ mod tests {
         let run_times_clone = Arc::clone(&run_times);
 
         let task = TaskBuilder::default()
-            .set_id(1)
             .set_valid(true)
             .set_interval(Duration::from_secs(2))
             .set_process(move || {
@@ -363,7 +362,6 @@ mod tests {
         let run_times_clone = Arc::clone(&run_times);
 
         let task = TaskBuilder::default()
-            .set_id(1)
             .set_interval(Duration::from_secs(5))
             .set_process(move || {
                 let times = Arc::clone(&run_times_clone);
@@ -373,10 +371,10 @@ mod tests {
             })
             .build();
 
-        manager.insert_task(task).unwrap();
+        let task_id = manager.insert_task(task).unwrap();
 
         for _ in 0..5 {
-            manager.trigger_task(1).await.unwrap();
+            manager.trigger_task(&task_id).await.unwrap();
         }
 
         tokio::time::sleep(Duration::from_secs(4)).await;
@@ -391,7 +389,6 @@ mod tests {
         let run_times_clone = Arc::clone(&run_times);
 
         let task = TaskBuilder::default()
-            .set_id(1)
             .set_interval(Duration::from_secs(2))
             .set_process(move || {
                 let times = Arc::clone(&run_times_clone);
@@ -401,10 +398,10 @@ mod tests {
             })
             .build();
 
-        manager.insert_task(task).unwrap();
+        let task_id = manager.insert_task(task).unwrap();
         time::sleep(Duration::from_secs(3)).await;
         assert_eq!(run_times.load(Ordering::Relaxed), 1);
-        manager.stop_task(1).unwrap();
+        manager.stop_task(&task_id).unwrap();
 
         time::sleep(Duration::from_secs(3)).await;
         assert_eq!(run_times.load(Ordering::Relaxed), 1);
@@ -418,7 +415,6 @@ mod tests {
         let run_times_clone = Arc::clone(&run_times);
 
         let task = TaskBuilder::default()
-            .set_id(1)
             .set_interval(Duration::from_secs(2))
             .set_process(move || {
                 let times = Arc::clone(&run_times_clone);
@@ -427,11 +423,11 @@ mod tests {
                 }
             })
             .build();
-        manager.insert_task(task).unwrap();
-        assert_eq!(manager.stop_task(1), Ok(()));
+        let task_id = manager.insert_task(task).unwrap();
+        assert_eq!(manager.stop_task(&task_id), Ok(()));
         assert_eq!(
-            manager.stop_task(1),
-            Err(TaskManagerError::TaskAlreadyStop(1))
+            manager.stop_task(&task_id),
+            Err(TaskManagerError::TaskAlreadyStop(task_id))
         );
     }
 
@@ -443,7 +439,6 @@ mod tests {
         let run_times_clone = Arc::clone(&run_times);
 
         let task = TaskBuilder::default()
-            .set_id(1)
             .set_interval(Duration::from_secs(2))
             .set_process(move || {
                 let times = Arc::clone(&run_times_clone);
@@ -452,28 +447,28 @@ mod tests {
                 }
             })
             .build();
-        manager.insert_task(task).unwrap();
+        let task_id = manager.insert_task(task).unwrap();
         assert_eq!(
-            manager.start_task(1),
-            Err(TaskManagerError::TaskAlreadyRunning(1))
+            manager.start_task(&task_id),
+            Err(TaskManagerError::TaskAlreadyRunning(task_id))
         );
     }
 
     #[tokio::test]
     async fn test_remove_task() {
         let manager = new_manager();
-        let task = TaskBuilder::default().set_id(1).build();
+        let task = TaskBuilder::default().build();
 
-        manager.insert_task(task).unwrap();
+        let task_id = manager.insert_task(task).unwrap();
         assert_eq!(manager.task_count().unwrap(), 1);
 
-        manager.remove_task(1).unwrap();
+        manager.remove_task(&task_id).unwrap();
         assert_eq!(manager.task_count().unwrap(), 0);
 
         // repeat remove
         assert_eq!(
-            manager.remove_task(1),
-            Err(TaskManagerError::TaskNotExists(1))
+            manager.remove_task(&task_id),
+            Err(TaskManagerError::TaskNotExists(task_id))
         );
     }
 
@@ -500,7 +495,6 @@ mod tests {
         let run_times_clone = Arc::clone(&run_times);
 
         let task = TaskBuilder::default()
-            .set_id(1)
             .set_interval(Duration::from_secs(3))
             .set_process(move || {
                 let times = Arc::clone(&run_times_clone);
@@ -509,11 +503,11 @@ mod tests {
                 }
             })
             .build();
-        manager.insert_task(task).unwrap();
-        manager.stop_task(1).unwrap();
-        manager.start_task(1).unwrap();
-        manager.stop_task(1).unwrap();
-        manager.start_task(1).unwrap();
+        let task_id: String = manager.insert_task(task).unwrap();
+        manager.stop_task(&task_id).unwrap();
+        manager.start_task(&task_id).unwrap();
+        manager.stop_task(&task_id).unwrap();
+        manager.start_task(&task_id).unwrap();
         time::sleep(Duration::from_secs(5)).await;
         assert_eq!(run_times.load(Ordering::Relaxed), 1);
     }
@@ -526,7 +520,6 @@ mod tests {
         let run_times_clone = Arc::clone(&run_times);
 
         let task = TaskBuilder::default()
-            .set_id(1)
             .set_interval(Duration::from_secs(1))
             .set_process(move || {
                 let times = Arc::clone(&run_times_clone);
@@ -551,7 +544,6 @@ mod tests {
         let run_times_clone = Arc::clone(&run_times);
 
         let task = TaskBuilder::default()
-            .set_id(1)
             .set_interval(Duration::from_secs(1))
             .set_process(move || {
                 let times = Arc::clone(&run_times_clone);
@@ -562,13 +554,13 @@ mod tests {
             .set_max_run_count(0)
             .build();
 
-        manager.insert_task(task.clone()).unwrap();
+        let task_id = manager.insert_task(task.clone()).unwrap();
         time::sleep(Duration::from_secs(3)).await;
         assert_eq!(task.run_count.load(Ordering::Relaxed), 0);
         assert_eq!(task.valid.load(Ordering::Relaxed), false);
         assert_eq!(run_times.load(Ordering::Relaxed), 0);
 
-        manager.start_task(1).unwrap();
+        manager.start_task(&task_id).unwrap();
         time::sleep(Duration::from_secs(3)).await;
         assert_eq!(task.run_count.load(Ordering::Relaxed), 0);
         assert_eq!(task.valid.load(Ordering::Relaxed), false);
@@ -583,7 +575,6 @@ mod tests {
         let run_times_clone = Arc::clone(&run_times);
 
         let task = TaskBuilder::default()
-            .set_id(1)
             .set_interval(Duration::from_secs(1))
             .set_process(move || {
                 let times = Arc::clone(&run_times_clone);
