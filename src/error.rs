@@ -4,11 +4,13 @@ use std::sync::PoisonError;
 
 use tokio::sync::mpsc::error::SendError;
 
-use crate::delay::TaskIdentifier;
+use task::TaskIdentifier;
+
+use crate::task;
 
 // ===== TaskManager Error =====
 #[derive(Debug, PartialEq, Clone)]
-pub enum TaskManagerError {
+pub enum DelayError {
     TaskNotExists(TaskIdentifier),
     TaskAlreadyExists(TaskIdentifier),
     TaskAlreadyRemove(TaskIdentifier),
@@ -18,9 +20,9 @@ pub enum TaskManagerError {
     TasksLockingError,
 }
 
-impl Error for TaskManagerError {}
+impl Error for DelayError {}
 
-impl fmt::Display for TaskManagerError {
+impl fmt::Display for DelayError {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         let message = match self {
             Self::TaskNotExists(id) => format!("task {id} does not exist"),
@@ -35,15 +37,15 @@ impl fmt::Display for TaskManagerError {
     }
 }
 
-impl<T> From<SendError<T>> for TaskManagerError {
+impl<T> From<SendError<T>> for DelayError {
     fn from(_: SendError<T>) -> Self {
-        TaskManagerError::TaskChannelSendError
+        DelayError::TaskChannelSendError
     }
 }
 
-impl<T> From<PoisonError<T>> for TaskManagerError {
+impl<T> From<PoisonError<T>> for DelayError {
     fn from(_: PoisonError<T>) -> Self {
-        TaskManagerError::TasksLockingError
+        DelayError::TasksLockingError
     }
 }
 
