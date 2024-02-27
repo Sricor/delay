@@ -78,3 +78,22 @@ impl Delay {
         });
     }
 }
+
+
+#[cfg(test)]
+mod tests_delay {
+    use super::*;
+
+    fn simple_delay() -> Delay {
+        Delay::new()
+    }
+
+    fn simple_task() -> Task {
+        Task::default()
+    }
+    // #[test]
+    // fn test_insert() {
+    //     let delay = simple_delay();
+    //     delay.insert().unwrap()
+    // }
+}
