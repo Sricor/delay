@@ -57,112 +57,95 @@ impl Task {
     pub(crate) async fn sleep(&self) {
         time::sleep(self.interval).await
     }
-    
-    pub(crate) async fn is_reached_max_runs_count (self: &Arc<Self>) -> bool {
-        if let Some(v) = self.max_run_count {
-            return v >
+}
+
+
+
+// ===== Task Builder =====
+pub struct TaskBuilder {
+    identifier: TaskIdentifier,
+    interval: Duration,
+    process: Box<dyn Fn() -> PinBoxFuture<()> + Send + Sync>,
+    timeout: Option<Duration>,
+    max_run_count: Option<usize>,
+    callback: Option<Box<dyn Fn() -> PinBoxFuture<()> + Send + Sync>>,
+}
+
+impl Default for TaskBuilder {
+    fn default() -> Self {
+        Self {
+            identifier: Uuid::new_v4().to_string(),
+            process: Box::new(move || Box::pin(async {})),
+            ..Default::default()
         }
     }
 }
 
-// // ===== Task Builder =====
-// pub struct TaskBuilder {
-//     id: TaskIdentifier,
-//     valid: TaskValid,
-//     process: TaskProcess,
-//     interval: TaskInterval,
-//     callback: Option<TaskCallback>,
-//     max_run_count: Option<TaskRunCount>,
-//     timeout: Option<Duration>,
-// }
+impl TaskBuilder {
+    /// The unique identifier of the task, through which the deletion task can be started or stopped.
+    pub fn set_identifier(mut self, identifier: TaskIdentifier) -> Self {
+        self.identifier = identifier;
+        self
+    }
 
-// impl Default for TaskBuilder {
-//     fn default() -> Self {
-//         Self {
-//             id: Uuid::new_v4().to_string(),
-//             valid: AtomicBool::new(true),
-//             process: Box::new(move || Box::pin(async {})),
-//             interval: Duration::from_secs(5),
-//             max_run_count: None,
-//             callback: None,
-//             timeout: None,
-//         }
-//     }
-// }
+    /// Task execution code block
+    pub fn set_process<F>(mut self, process: F) -> Self
+    where
+        F: Fn() -> PinBoxFuture<()> + Send + Sync + 'static
+    {
+        self.process = Box::new(process);
+        self
+    }
 
-// impl TaskBuilder {
-//     /// The unique identifier of the task, through which the deletion task can be started or stopped.
-//     pub fn set_id(mut self, id: TaskIdentifier) -> Self {
-//         self.id = id;
-//         self
-//     }
+    /// Callback process after task execution is completed
+    pub fn set_callback<F>(mut self, callback: F) -> Self
+    where
+        F: Fn() -> PinBoxFuture<()> + Send + Sync + 'static
+    {
+        self.callback = Some(Box::new(callback));
+        self
+    }
 
-//     /// Task execution code block
-//     pub fn set_process<F, Fut>(mut self, process: F) -> Self
-//     where
-//         F: Fn() -> Fut + Send + Sync + 'static,
-//         Fut: Future<Output = ()> + Send + Sync + 'static,
-//     {
-//         self.process = Box::new(move || Box::pin(process()));
-//         self
-//     }
+    /// The timeout period of the task. When the task execution times out, the timeout error will be passed to the callback.
+    pub fn set_timeout(mut self, timeout: Duration) -> Self {
+        self.timeout = Some(timeout);
+        self
+    }
 
-//     /// Callback process after task execution is completed
-//     pub fn set_callback<F, Fut>(mut self, callback: F) -> Self
-//     where
-//         F: Fn(Result<(), TaskError>) -> Fut + Send + Sync + 'static,
-//         Fut: Future<Output = ()> + Send + Sync + 'static,
-//     {
-//         self.callback = Some(Box::new(move |e| Box::pin(callback(e))));
-//         self
-//     }
+    pub fn set_timeout_from_secs(mut self, secs: u64) -> Self {
+        self.timeout = Some(time::Duration::from_secs(secs));
+        self
+    }
 
-//     /// The validity of the task. When it is false, the task created will not be automatically executed.
-//     pub fn set_valid(mut self, valid: bool) -> Self {
-//         self.valid = AtomicBool::new(valid);
-//         self
-//     }
+    /// Task execution cycle interval
+    pub fn set_interval(mut self, interval: Duration) -> Self {
+        self.interval = interval;
+        self
+    }
 
-//     /// The timeout period of the task. When the task execution times out, the timeout error will be passed to the callback.
-//     pub fn set_timeout(mut self, timeout: TaskTimeout) -> Self {
-//         self.timeout = Some(timeout);
-//         self
-//     }
+    pub fn set_interval_from_secs(mut self, secs: u64) -> Self {
+        self.interval = time::Duration::from_secs(secs);
+        self
+    }
 
-//     pub fn set_timeout_from_secs(mut self, secs: u64) -> Self {
-//         self.timeout = Some(time::Duration::from_secs(secs));
-//         self
-//     }
+    pub fn set_max_run_count(mut self, count: usize) -> Self {
+        self.max_run_count = Some(count);
+        self
+    }
 
-//     /// Task execution cycle interval
-//     pub fn set_interval(mut self, interval: TaskInterval) -> Self {
-//         self.interval = interval;
-//         self
-//     }
+    pub fn build(self) -> Arc<Task> {
+        let task = Task {
+            identifier: self.identifier,
+            valid: AtomicBool::new(true),
+            running: AtomicU32::new(0),
+            run_count: AtomicU32::new(0),
+            max_run_count: self.max_run_count,
+            interval: self.interval,
+            process: self.process,
+            callback: self.callback,
+            timeout: self.timeout,
+        };
 
-//     pub fn set_interval_from_secs(mut self, secs: u64) -> Self {
-//         self.interval = time::Duration::from_secs(secs);
-//         self
-//     }
-
-//     pub fn set_max_run_count(mut self, count: u32) -> Self {
-//         self.max_run_count = Some(AtomicU32::new(count));
-//         self
-//     }
-
-//     pub fn build(self) -> Arc<Task> {
-//         let task = Task {
-//             id: self.id,
-//             valid: self.valid,
-//             running: AtomicBool::new(false),
-//             run_count: AtomicU32::new(0),
-//             max_run_count: self.max_run_count,
-//             interval: self.interval,
-//             process: self.process,
-//             callback: self.callback,
-//             timeout: self.timeout,
-//         };
-
-//         Arc::new(task)
-//     }
-// }
+        Arc::new(task)
+    }
+}
