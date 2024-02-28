@@ -1,6 +1,5 @@
-mod delay;
-mod error;
-mod task;
+pub mod error;
+pub mod task;
 // mod manager;
 
 // pub mod prelude;
