@@ -1,6 +1,7 @@
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
 use std::time::Duration;
 
 use tokio::time;
@@ -38,10 +39,6 @@ impl Task {
         &self.identifier
     }
 
-    pub async fn trigger(&self) {
-        (self.process)().await;
-    }
-
     pub fn running(&self) -> usize {
         self.running.load(Ordering::Acquire)
     }
@@ -50,8 +47,38 @@ impl Task {
         self.total_runs.load(Ordering::Acquire)
     }
 
+    pub async fn trigger(&self) {
+        (self.process)().await;
+    }
+
+    pub async fn run(self: Arc<Self>) {
+        tokio::spawn(async move {
+            if self.is_reached_max_concurrent() {
+                return;
+            }
+
+            self.running_fetch_add(1);
+            self.sleep().await;
+
+            if let Some(duration) = &self.timeout {
+                let _ = time::timeout(duration.clone(), self.trigger()).await;
+            } else {
+                let _ = self.trigger().await;
+            };
+
+            self.total_runs_fetch_add(1);
+            self.running_fetch_sub(1);
+        });
+
+        time::sleep(Duration::ZERO).await;
+    }
+
+    pub(crate) fn strong_count(self: &Arc<Self>) -> usize {
+        Arc::strong_count(self)
+    }
+
     pub(crate) async fn sleep(&self) {
-        time::sleep(self.interval).await
+        time::sleep(self.interval).await;
     }
 
     pub(crate) fn total_runs_fetch_add(&self, val: usize) {
@@ -68,28 +95,10 @@ impl Task {
 
     pub(crate) fn is_reached_max_concurrent(&self) -> bool {
         if let Some(value) = self.max_concurrent {
-            return self.running() > value;
+            return self.running() >= value;
         }
 
         false
-    }
-
-    pub async fn run(&self) {
-        if self.is_reached_max_concurrent() {
-            return;
-        }
-
-        self.running_fetch_add(1);
-        self.sleep().await;
-
-        if let Some(duration) = &self.timeout {
-            let _ = time::timeout(duration.clone(), self.trigger()).await;
-        } else {
-            let _ = self.trigger().await;
-        };
-
-        self.total_runs_fetch_add(1);
-        self.running_fetch_sub(1);
     }
 }
 
@@ -99,7 +108,7 @@ pub struct TaskBuilder {
     pub interval: Duration,
     pub process: Box<dyn Fn() -> PinBoxFuture<()> + Send + Sync>,
     pub timeout: Option<Duration>,
-    pub max_run_count: Option<usize>,
+    pub max_concurrent: Option<usize>,
 }
 
 impl Default for TaskBuilder {
@@ -109,7 +118,7 @@ impl Default for TaskBuilder {
             process: Box::new(move || Box::pin(async {})),
             interval: Duration::default(),
             timeout: None,
-            max_run_count: None,
+            max_concurrent: None,
         }
     }
 }
@@ -152,8 +161,8 @@ impl TaskBuilder {
         self
     }
 
-    pub fn set_max_run_count(mut self, count: usize) -> Self {
-        self.max_run_count = Some(count);
+    pub fn set_max_concurrent(mut self, count: usize) -> Self {
+        self.max_concurrent = Some(count);
         self
     }
 
@@ -162,7 +171,7 @@ impl TaskBuilder {
             identifier: self.identifier,
             running: AtomicUsize::new(0),
             total_runs: AtomicUsize::new(0),
-            max_concurrent: self.max_run_count,
+            max_concurrent: self.max_concurrent,
             interval: self.interval,
             process: self.process,
             timeout: self.timeout,
@@ -174,15 +183,152 @@ impl TaskBuilder {
 mod tests_task {
     use super::*;
 
-    fn simple_task() -> Task {
-        TaskBuilder::default().build()
+    #[tokio::test]
+    async fn test_task_runing() {
+        let task = TaskBuilder::default()
+            .set_interval_from_secs(1)
+            .build();
+        let task = Arc::new(task);
+
+        let number = 10;
+
+        for _ in 0..number {
+            let task = task.clone();
+            task.run().await;
+        }
+ 
+        assert_eq!(task.running(), 10);
+        assert_eq!(task.total_runs(), 0);
+        assert_eq!(task.strong_count(), 11);
+
+        time::sleep(Duration::from_secs(2)).await;
+        assert_eq!(task.running(), 0);
+        assert_eq!(task.total_runs(), 10);
+        assert_eq!(task.strong_count(), 1);
     }
 
     #[tokio::test]
-    async fn test_task_runing() {
-        let task = simple_task();
-        task.run().await;
-        task.run().await;
+    async fn test_task_runing_multi() {
+        let task = TaskBuilder::default()
+            .set_interval_from_secs(1)
+            .build();
+        let task = Arc::new(task);
+
+        let task_sec = TaskBuilder::default()
+            .set_interval_from_secs(2)
+            .build();
+        let task_sec = Arc::new(task_sec);
+
+        let number = 10;
+
+        for _ in 0..number {
+            let task = task.clone();
+            task.run().await;
+
+            let task_sec = task_sec.clone();
+            task_sec.run().await;
+        }
+ 
+        assert_eq!(task.running(), 10);
+        assert_eq!(task.total_runs(), 0);
+        assert_eq!(task.strong_count(), 11);
+
+        assert_eq!(task_sec.running(), 10);
+        assert_eq!(task_sec.total_runs(), 0);
+        assert_eq!(task_sec.strong_count(), 11);
+
+        time::sleep(Duration::from_secs(1)).await;
+        assert_eq!(task.running(), 0);
+        assert_eq!(task.total_runs(), 10);
+        assert_eq!(task.strong_count(), 1);
+
+        assert_eq!(task_sec.running(), 10);
+        assert_eq!(task_sec.total_runs(), 0);
+        assert_eq!(task_sec.strong_count(), 11);
+
+        time::sleep(Duration::from_secs(1)).await;
+        assert_eq!(task_sec.running(), 0);
+        assert_eq!(task_sec.total_runs(), 10);
+        assert_eq!(task_sec.strong_count(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_task_runing_max_concurrent() {
+        let task = TaskBuilder::default()
+            .set_interval_from_secs(1)
+            .set_max_concurrent(5)
+            .build();
+        let task = Arc::new(task);
+
+        let number = 15;
+
+        for _ in 0..number {
+            let task = task.clone();
+            task.run().await;
+        }
+
+        assert_eq!(task.running(), 5);
+        assert_eq!(task.total_runs(), 0);
+        assert_eq!(task.strong_count(), 6);
+        assert_eq!(task.is_reached_max_concurrent(), true);
+
+
+        time::sleep(Duration::from_secs(2)).await;
+        assert_eq!(task.running(), 0);
+        assert_eq!(task.total_runs(), 5);
+        assert_eq!(task.strong_count(), 1);
+        assert_eq!(task.is_reached_max_concurrent(), false);
+    }
+
+    #[tokio::test]
+    async fn test_task_runing_zero_concurrent() {
+        let task = TaskBuilder::default()
+            .set_max_concurrent(0)
+            .build();
+        let task = Arc::new(task);
+
+        let number = 10;
+
+        for _ in 0..number {
+            let task = task.clone();
+            task.run().await;
+        }
+
+        assert_eq!(task.running(), 0);
+        assert_eq!(task.total_runs(), 0);
+        assert_eq!(task.strong_count(), 1);
+        assert_eq!(task.is_reached_max_concurrent(), true);
+
+        time::sleep(Duration::from_secs(1)).await;
+        assert_eq!(task.running(), 0);
+        assert_eq!(task.total_runs(), 0);
+        assert_eq!(task.strong_count(), 1);
+        assert_eq!(task.is_reached_max_concurrent(), true);
+    }
+
+    #[tokio::test]
+    async fn test_task_runing_one_concurrent() {
+        let task = TaskBuilder::default()
+            .set_max_concurrent(1)
+            .build();
+        let task = Arc::new(task);
+
+        let number = 1;
+
+        for _ in 0..number {
+            let task = task.clone();
+            task.run().await;
+        }
+
+        assert_eq!(task.running(), 1);
+        assert_eq!(task.total_runs(), 0);
+        assert_eq!(task.strong_count(), 2);
+        assert_eq!(task.is_reached_max_concurrent(), true);
+
+        time::sleep(Duration::from_secs(1)).await;
+        assert_eq!(task.running(), 0);
         assert_eq!(task.total_runs(), 1);
+        assert_eq!(task.strong_count(), 1);
+        assert_eq!(task.is_reached_max_concurrent(), false);
     }
 }
