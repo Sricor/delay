@@ -7,8 +7,10 @@ edition = "2021"
 tokio = { version = "1", features = ["full"] }
 uuid = {version = "1.7", features = ["v4", "fast-rng"]}
 
-# [dev-dependencies]
-# criterion = "0.5"
+tracing = "0.1"
+
+[dev-dependencies]
+tracing-test = "0.2"
 
 # [[bench]]
 # name = "simple"

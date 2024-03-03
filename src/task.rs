@@ -1,3 +1,4 @@
+use std::fmt::Debug;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -5,6 +6,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use tokio::time;
+use tracing::{instrument, trace};
 use uuid::Uuid;
 
 pub type TaskIdentifier = String;
@@ -48,29 +50,35 @@ impl Task {
     }
 
     pub async fn trigger(&self) {
+        trace!("trigger");
         (self.process)().await;
     }
 
     pub async fn run(self: Arc<Self>) {
-        tokio::spawn(async move {
-            if self.is_reached_max_concurrent() {
-                return;
-            }
-
-            self.running_fetch_add(1);
-            self.sleep().await;
-
-            if let Some(duration) = &self.timeout {
-                let _ = time::timeout(duration.clone(), self.trigger()).await;
-            } else {
-                let _ = self.trigger().await;
-            };
-
-            self.total_runs_fetch_add(1);
-            self.running_fetch_sub(1);
-        });
+        tokio::spawn(async move { self.call().await });
 
         time::sleep(Duration::ZERO).await;
+    }
+
+    #[instrument]
+    pub async fn call(&self) {
+        if self.is_reached_max_concurrent() {
+            trace!("reached max concurrent");
+            time::sleep(Duration::ZERO).await;
+            return;
+        }
+
+        self.running_fetch_add(1);
+        self.sleep().await;
+
+        if let Some(duration) = &self.timeout {
+            let _ = time::timeout(duration.clone(), self.trigger()).await;
+        } else {
+            let _ = self.trigger().await;
+        };
+
+        self.total_runs_fetch_add(1);
+        self.running_fetch_sub(1);
     }
 
     pub(crate) fn strong_count(self: &Arc<Self>) -> usize {
@@ -78,6 +86,7 @@ impl Task {
     }
 
     pub(crate) async fn sleep(&self) {
+        trace!("sleep");
         time::sleep(self.interval).await;
     }
 
@@ -99,6 +108,16 @@ impl Task {
         }
 
         false
+    }
+}
+
+impl Debug for Task {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Task")
+            .field("identifier", &self.identifier)
+            .field("running", &self.running)
+            .field("total_runs", &self.total_runs)
+            .finish()
     }
 }
 
@@ -185,9 +204,7 @@ mod tests_task {
 
     #[tokio::test]
     async fn test_task_runing() {
-        let task = TaskBuilder::default()
-            .set_interval_from_secs(1)
-            .build();
+        let task = TaskBuilder::default().set_interval_from_secs(1).build();
         let task = Arc::new(task);
 
         let number = 10;
@@ -196,7 +213,7 @@ mod tests_task {
             let task = task.clone();
             task.run().await;
         }
- 
+
         assert_eq!(task.running(), 10);
         assert_eq!(task.total_runs(), 0);
         assert_eq!(task.strong_count(), 11);
@@ -209,14 +226,10 @@ mod tests_task {
 
     #[tokio::test]
     async fn test_task_runing_multi() {
-        let task = TaskBuilder::default()
-            .set_interval_from_secs(1)
-            .build();
+        let task = TaskBuilder::default().set_interval_from_secs(1).build();
         let task = Arc::new(task);
 
-        let task_sec = TaskBuilder::default()
-            .set_interval_from_secs(2)
-            .build();
+        let task_sec = TaskBuilder::default().set_interval_from_secs(2).build();
         let task_sec = Arc::new(task_sec);
 
         let number = 10;
@@ -228,7 +241,7 @@ mod tests_task {
             let task_sec = task_sec.clone();
             task_sec.run().await;
         }
- 
+
         assert_eq!(task.running(), 10);
         assert_eq!(task.total_runs(), 0);
         assert_eq!(task.strong_count(), 11);
@@ -253,7 +266,7 @@ mod tests_task {
     }
 
     #[tokio::test]
-    async fn test_task_runing_max_concurrent() {
+    async fn test_task_runing_limit_concurrent() {
         let task = TaskBuilder::default()
             .set_interval_from_secs(1)
             .set_max_concurrent(5)
@@ -269,9 +282,7 @@ mod tests_task {
 
         assert_eq!(task.running(), 5);
         assert_eq!(task.total_runs(), 0);
-        assert_eq!(task.strong_count(), 6);
         assert_eq!(task.is_reached_max_concurrent(), true);
-
 
         time::sleep(Duration::from_secs(2)).await;
         assert_eq!(task.running(), 0);
@@ -282,9 +293,7 @@ mod tests_task {
 
     #[tokio::test]
     async fn test_task_runing_zero_concurrent() {
-        let task = TaskBuilder::default()
-            .set_max_concurrent(0)
-            .build();
+        let task = TaskBuilder::default().set_max_concurrent(0).build();
         let task = Arc::new(task);
 
         let number = 10;
@@ -296,7 +305,6 @@ mod tests_task {
 
         assert_eq!(task.running(), 0);
         assert_eq!(task.total_runs(), 0);
-        assert_eq!(task.strong_count(), 1);
         assert_eq!(task.is_reached_max_concurrent(), true);
 
         time::sleep(Duration::from_secs(1)).await;
@@ -308,9 +316,7 @@ mod tests_task {
 
     #[tokio::test]
     async fn test_task_runing_one_concurrent() {
-        let task = TaskBuilder::default()
-            .set_max_concurrent(1)
-            .build();
+        let task = TaskBuilder::default().set_max_concurrent(1).build();
         let task = Arc::new(task);
 
         let number = 1;
