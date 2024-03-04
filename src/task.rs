@@ -81,10 +81,6 @@ impl Task {
         self.running_fetch_sub(1);
     }
 
-    pub(crate) fn strong_count(self: &Arc<Self>) -> usize {
-        Arc::strong_count(self)
-    }
-
     pub(crate) async fn sleep(&self) {
         trace!("sleep");
         time::sleep(self.interval).await;
@@ -201,6 +197,12 @@ impl TaskBuilder {
 #[cfg(test)]
 mod tests_task {
     use super::*;
+
+    impl Task {
+        fn strong_count(self: &Arc<Self>) -> usize {
+            Arc::strong_count(self)
+        }
+    }
 
     #[tokio::test]
     async fn test_task_runing() {

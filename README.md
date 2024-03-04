@@ -4,23 +4,20 @@ Asynchronous delayed tasks using tokio runtime.
 ## Examples
 
 ```rust
-use delay::prelude::{time, TaskBuilder, TaskManager};
+use delay::prelude::{time, TaskBuilder};
 
 #[tokio::main]
 async fn main() {
-    let manager = TaskManager::new();
-
     // Create async task
     // Will print every 3 seconds
     let task = TaskBuilder::default()
-        .set_id(1)
         .set_interval(time::Duration::from_secs(3))
         .set_process(|| async {
             println!("Run an asynchronous task");
         })
         .build();
 
-    manager.insert_task(task).unwrap();
+    task.run().await;
 
     // Wait for async task to complete
     time::sleep(time::Duration::from_secs(10)).await;
@@ -34,11 +31,8 @@ use delay::prelude::{time, TaskBuilder, TaskManager};
 
 #[tokio::main]
 async fn main() {
-    let manager = TaskManager::new();
-
     // This task will time out
     let task = TaskBuilder::default()
-        .set_id(1)
         .set_timeout_from_secs(1)
         .set_process(|| async {
             time::sleep(time::Duration::from_secs(2)).await;
@@ -50,7 +44,7 @@ async fn main() {
         })
         .build();
 
-    manager.insert_task(task).unwrap();
+    task.run().await;
 
     // Wait for async task to complete
     time::sleep(time::Duration::from_secs(3)).await;

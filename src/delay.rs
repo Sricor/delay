@@ -2,12 +2,12 @@ use std::{
     collections::HashMap,
     sync::{
         atomic::{AtomicBool, Ordering},
-        Arc, Mutex,
+        Arc,
     },
     time::Duration,
 };
 
-use tokio::time;
+use tokio::{sync::Mutex, time};
 use tracing::{instrument, trace};
 
 use crate::{
@@ -54,7 +54,7 @@ impl Delay {
     }
 
     pub async fn insert(&self, task: Arc<Task>) -> DelayResult<TaskIdentifier> {
-        let mut inventory = self.inventory.lock()?;
+        let mut inventory = self.inventory.lock().await;
         let identifier = task.identifier().clone();
 
         if inventory.contains_key(&identifier) {
@@ -70,7 +70,7 @@ impl Delay {
     }
 
     pub async fn remove(&self, identifier: &TaskIdentifier) -> DelayResult<Arc<Task>> {
-        let mut inventory = self.inventory.lock()?;
+        let mut inventory = self.inventory.lock().await;
         let delay_task = inventory.remove(identifier);
         if let Some(val) = delay_task {
             val.disable();
@@ -117,15 +117,15 @@ mod tests_delay {
 
         let task = simple_task_builder().build();
         delay.insert(Arc::new(task)).await.unwrap();
-        assert_eq!(delay.inventory.lock().unwrap().len(), 1);
+        assert_eq!(delay.inventory.lock().await.len(), 1);
 
         let task = simple_task_builder().build();
         let identifier = task.identifier().clone();
         delay.insert(Arc::new(task)).await.unwrap();
-        assert_eq!(delay.inventory.lock().unwrap().len(), 2);
+        assert_eq!(delay.inventory.lock().await.len(), 2);
 
         delay.remove(&identifier).await.unwrap();
-        assert_eq!(delay.inventory.lock().unwrap().len(), 1);
+        assert_eq!(delay.inventory.lock().await.len(), 1);
     }
 
     #[tokio::test]
@@ -302,10 +302,7 @@ mod tests_delay {
     #[tracing_test::traced_test]
     async fn test_multi_concurrent_restart_without_sleep_second() {
         let delay = simple_delay();
-        let task = Arc::new(
-            simple_task_builder()
-            .set_interval_from_secs(2)
-            .build());
+        let task = Arc::new(simple_task_builder().set_interval_from_secs(2).build());
         let identifier = task.identifier().clone();
 
         delay.insert(task.clone()).await.unwrap();
