@@ -5,7 +5,7 @@ edition = "2021"
 
 [dependencies]
 tokio = { version = "1", features = ["full"] }
-uuid = {version = "1.7", features = ["v4", "fast-rng"]}
+uuid = {version = "1.8", features = ["v4", "fast-rng"]}
 
 tracing = "0.1"
 
